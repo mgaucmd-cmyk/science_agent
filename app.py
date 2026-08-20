@@ -177,7 +177,7 @@ def render_extras(images, questions, practice, practice_source, frontier, links)
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         if msg["role"] == "assistant":
-            st.markdown(f'<div class="answer-card">\n\n{msg["content"]}\n\n</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="answer-card">\n\n{msg.get("answer", "")}\n\n</div>', unsafe_allow_html=True)
             render_extras(
                 msg.get("images", []),
                 msg.get("questions", []),
