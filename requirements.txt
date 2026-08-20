@@ -1,0 +1,7 @@
+streamlit
+openai
+tavily-python
+scikit-learn
+jieba
+pdfplumber
+python-docx
