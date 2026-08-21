@@ -45,6 +45,10 @@ Action的格式必须是以下之一：
 
 段落之间要有换行，适当使用加粗突出关键词、公式，避免输出成一整段文字。
 
+# 语言与公式格式要求（严格遵守）:
+- 全部输出必须是简体中文。即使你检索到的参考资料是英文，也必须完全理解后用中文重新表达，绝不能直接把英文原文或翻译腔句子夹杂在回答里。
+- 数学公式必须使用美元符号包裹：行内公式用单个美元符号，如 F浮=ρ液gV排 这种简单公式可以直接用文字加下标表示；如果确实需要用LaTeX，行内公式写成 $F_{浮}=\rho_{液}gV_{排}$ 这种单美元符号包裹的形式，块级公式用两个美元符号包裹并单独成行。禁止使用 \\( \\) 或 \\[ \\] 这种反斜杠加括号的LaTeX定界符，Streamlit渲染不了会显示成乱码。
+
 # 重要提示:
 - 每次只输出一对Thought‑Action
 - Action必须在同一行，不要换行
@@ -78,7 +82,7 @@ def search_science(topic: str) -> str:
                 _session_images.append(url)
 
         if response.get("answer"):
-            return response["answer"]
+            return "（以下为检索到的参考资料，如含英文，请在最终科普内容中用中文重新表达）：\n" + response["answer"]
         formatted_results = []
         for result in response.get("results", []):
             formatted_results.append(f"- {result['title']}: {result['content']}")
@@ -90,22 +94,36 @@ def search_science(topic: str) -> str:
 
 
 def generate_question(content: str) -> str:
-    """根据科普文本生成启发式思考问题，同时单独保存一份供网页展示"""
+    """根据科普文本生成启发式思考问题（用自家LLM转述，保证输出为中文），同时单独保存一份供网页展示"""
     api_key = _get_secret("TAVILY_API_KEY")
-    if not api_key:
-        return "错误：未配置TAVILY_API_KEY。"
-    tavily = TavilyClient(api_key=api_key)
-    query = f"基于下面科普内容，生成3‑5个启发思考的问题，不要简单记忆题，要引导分析原理、拓展思考：{content[:1200]}"
-    try:
-        response = tavily.search(query=query, search_depth="basic", include_answer=True)
-        if response.get("answer"):
-            result = response["answer"]
-        else:
-            result = "请结合上面科普内容思考：为什么会出现该现象？生活中还有哪些相似实例？"
-        _session_questions.append(result)
-        return "拓展思考题：\n" + result
-    except Exception as e:
-        return f"生成思考题异常：{e}"
+    context = ""
+    if api_key:
+        try:
+            tavily = TavilyClient(api_key=api_key)
+            response = tavily.search(
+                query=f"{content[:200]} 启发式思考问题 原理分析",
+                search_depth="basic",
+                max_results=5,
+            )
+            context = "\n".join(r.get("content", "") for r in response.get("results", []))
+        except Exception:
+            context = ""
+
+    llm = _get_llm()
+    prompt = (
+        f"科普内容：{content[:1200]}\n\n"
+        + (f"补充参考资料（可能包含英文，仅供参考，不要照抄或直译，需理解后融会贯通）：{context[:1500]}\n\n" if context else "")
+        + "请基于以上内容，生成3-5个启发思考的问题，引导分析原理、拓展思考，不要出简单记忆题。直接输出问题列表，不要有多余说明。"
+    )
+    result = llm.generate(
+        prompt,
+        system_prompt="你是一名善于启发学生深入思考的老师。无论参考资料是什么语言，输出必须全部是简体中文。",
+    )
+    if result.startswith("错误："):
+        return result
+    result = result.strip()
+    _session_questions.append(result)
+    return "拓展思考题：\n" + result
 
 
 available_tools = {
@@ -246,31 +264,34 @@ def get_practice_problems(topic: str, level: str) -> Tuple[Optional[str], str]:
 def get_frontier_challenge(topic: str) -> Optional[str]:
     """
     介绍该方向目前尚未解决的前沿问题/技术瓶颈，激发深入思考。
-    优先用搜索结果，搜不到时退化为模型总结（并要求模型保守、不编造细节）。
+    先用搜索获取参考资料，再统一交给自家LLM转述成中文（避免直接透传英文摘要）。
     """
     api_key = _get_secret("TAVILY_API_KEY")
-    text = None
+    context = ""
     if api_key:
         try:
             tavily = TavilyClient(api_key=api_key)
             response = tavily.search(
                 query=f"{topic} 领域未解决的问题 前沿难题 技术瓶颈",
                 search_depth="basic",
-                include_answer=True,
+                max_results=5,
             )
-            text = response.get("answer")
+            context = "\n".join(r.get("content", "") for r in response.get("results", []))
         except Exception:
-            text = None
+            context = ""
 
-    if not text:
-        llm = _get_llm()
-        text = llm.generate(
-            f"请简要介绍『{topic}』相关领域目前科学界公认尚未解决的1-2个前沿问题或技术瓶颈，"
-            f"说明其意义与难点所在，激发读者深入思考。如果你不确定某个具体细节，请直接略过，不要编造。"
-            f"如果该主题实在没有明显的'未解决前沿问题'，请只回复：暂无。",
-            system_prompt="你是一名严谨的科学作家，只陈述你确信真实存在的前沿难题，绝不编造具体数据或事件。",
-        )
-    if not text or "暂无" in text.strip()[:10]:
+    llm = _get_llm()
+    prompt = (
+        f"主题：{topic}\n\n"
+        + (f"检索到的参考资料（可能包含英文，请理解后完全用中文重新表达，不要保留英文原文或直译腔）：{context[:1500]}\n\n" if context else "")
+        + "请简要介绍该方向目前科学界公认尚未解决的1-2个前沿问题或技术瓶颈，说明其意义与难点所在，激发读者深入思考。"
+          "如果你不确定某个具体细节，请直接略过，不要编造。如果该主题实在没有明显的'未解决前沿问题'，请只回复：暂无。"
+    )
+    text = llm.generate(
+        prompt,
+        system_prompt="你是一名严谨的科学作家，只陈述你确信真实存在的前沿难题，绝不编造具体数据或事件。无论参考资料是什么语言，输出必须全部是简体中文。",
+    )
+    if not text or "暂无" in text.strip()[:10] or text.startswith("错误："):
         return None
     return text.strip()
 
